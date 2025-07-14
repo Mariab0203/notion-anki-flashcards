@@ -7,15 +7,25 @@ import openai
 st.set_page_config(page_title="Notion → Anki + IA", layout="centered")
 st.title("🧠 Flashcards: Notion → Anki + IA")
 
+# Aviso de segurança
+st.warning("""
+⚠️ **Importante:** Nunca compartilhe seu Token do Notion ou Chave da OpenAI com outras pessoas.
+Estes dados são sensíveis e permitem acesso às suas informações privadas.
+Use-os somente para este app e mantenha-os em segurança.
+""")
+
 # Configurações do OpenAI (necessário cadastrar sua chave se quiser IA)
 openai_api_key = st.sidebar.text_input("🔑 OpenAI API Key (para IA)", type="password")
 if openai_api_key:
     openai.api_key = openai_api_key
 
-st.sidebar.header("Opções de entrada de dados")
-use_api = st.sidebar.checkbox("📦 Obter do Notion (API)", value=True)
-use_csv = st.sidebar.checkbox("📁 Upload CSV do Notion", value=True)
-use_ia = st.sidebar.checkbox("🤖 Gerar com IA a partir de texto", value=True)
+st.sidebar.header("⚠️ Atenção")
+st.sidebar.info("""
+Por segurança:
+- Não compartilhe seu Token do Notion ou OpenAI.
+- Esses dados são usados **apenas durante sua sessão**.
+- O app **não armazena** nenhuma chave ou dado sensível.
+""")
 
 # Notion API
 token = st.sidebar.text_input("Token Notion", type="password")
@@ -47,7 +57,7 @@ def generate_with_ia(text):
         f"Texto para análise:\n{text}\n"
         "Resposta no formato:\nPergunta 1 || Resposta 1\nPergunta 2 || Resposta 2\n..."
     )
-    resp = openai.Completion.create(engine=\"gpt-3.5-turbo\", prompt=prompt, max_tokens=500)
+    resp = openai.Completion.create(engine="gpt-3.5-turbo", prompt=prompt, max_tokens=500)
     cards = []
     for line in resp.choices[0].text.strip().splitlines():
         if '||' in line:
@@ -57,24 +67,26 @@ def generate_with_ia(text):
 
 cards = []
 # Execução
-if use_api:
+if st.sidebar.checkbox("📦 Obter do Notion (API)", value=True):
     if token and db_id:
         st.sidebar.success("Será buscado do Notion via API.")
         cards += fetch_from_notion(token, db_id)
     else:
         st.sidebar.warning("Token ou DB ID faltando para Notion API.")
-if use_csv:
+
+if st.sidebar.checkbox("📁 Upload CSV do Notion", value=True):
     uploaded = st.sidebar.file_uploader("Upload CSV (com colunas Pergunta/Resposta)", type=['csv'])
     if uploaded:
         cards += fetch_from_csv(uploaded)
-if use_ia:
+
+if st.sidebar.checkbox("🤖 Gerar com IA a partir de texto", value=True):
     raw_text = st.sidebar.text_area("Texto ou Markdown para IA gerar flashcards")
     if raw_text and openai_api_key:
         if st.sidebar.button("Gerar flashcards com IA"):
             ia_cards = generate_with_ia(raw_text)
             st.sidebar.info(f"IA gerou {len(ia_cards)} flashcards.")
             cards += ia_cards
-    elif use_ia:
+    elif raw_text:
         st.sidebar.warning("Chave OpenAI necessária para IA.")
 
 # Exibir resultados

@@ -57,11 +57,20 @@ def generate_with_ia(text):
         f"Texto para análise:\n{text}\n"
         "Resposta no formato:\nPergunta 1 || Resposta 1\nPergunta 2 || Resposta 2\n..."
     )
-    resp = openai.Completion.create(engine="gpt-3.5-turbo", prompt=prompt, max_tokens=500)
+    response = openai.ChatCompletion.create(
+        model="gpt-3.5-turbo",
+        messages=[
+            {"role": "user", "content": prompt}
+        ],
+        max_tokens=500,
+        temperature=0.7,
+        n=1,
+    )
     cards = []
-    for line in resp.choices[0].text.strip().splitlines():
+    text_response = response.choices[0].message.content.strip()
+    for line in text_response.splitlines():
         if '||' in line:
-            q, a = [s.strip() for s in line.split('||',1)]
+            q, a = [s.strip() for s in line.split('||', 1)]
             cards.append((q, a))
     return cards
 

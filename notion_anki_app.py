@@ -1,163 +1,197 @@
 import streamlit as st
-import json
 import requests
+import json
 from typing import List, Dict
 
-# --- Função para extrair texto dos blocos da página JSON do Notion ---
+# --- Funções de extração e geração ---
+
 def extract_page_text(page_json: dict) -> str:
+    """
+    Extrai texto de uma página JSON do Notion de forma robusta.
+    """
     texts = []
-    # Notion retorna blocos em "results"
-    for block in page_json.get("results", []):
-        # Nem todos os blocos tem texto, verificamos se tem tipo e texto
-        if "type" in block and block.get(block["type"], {}).get("text"):
-            texts.append("".join([t["plain_text"] for t in block[block["type"]]["text"]]))
+    try:
+        for block in page_json.get("results", []):
+            block_type = block.get("type")
+            if not block_type:
+                continue
+            text_objs = block.get(block_type, {}).get("text", [])
+            if not text_objs:
+                continue
+            texts.append("".join([t.get("plain_text", "") for t in text_objs]))
+    except Exception as e:
+        st.warning(f"Erro ao extrair texto do Notion: {e}")
     return "\n\n".join(texts)
 
-# --- Função para gerar flashcards via OpenAI ---
-def generate_flashcards_via_openai(text: str, openai_api_key: str) -> List[Dict]:
-    import openai
-    openai.api_key = openai_api_key
-
-    prompt = f"""
-Você é um gerador automático de flashcards. 
-A partir do texto abaixo, gere flashcards no formato "Frente | Verso", separados por linhas.
-Não gere mais que 15 flashcards.
-Utilize informações detalhadas e relevantes.
-Texto:
-{text}
-"""
-
+def generate_flashcards_from_text(openai_api_key: str, text: str, max_cards=15) -> List[Dict[str, str]]:
+    """
+    Usa OpenAI para gerar flashcards a partir do texto. Limita a max_cards.
+    """
+    prompt = (
+        f"Transforme o seguinte texto em flashcards no formato 'pergunta | resposta'. "
+        f"Crie até {max_cards} flashcards com informações detalhadas:\n\n{text}"
+    )
+    headers = {
+        "Authorization": f"Bearer {openai_api_key}",
+        "Content-Type": "application/json"
+    }
+    data = {
+        "model": "text-davinci-003",
+        "prompt": prompt,
+        "temperature": 0.7,
+        "max_tokens": 1000,
+        "n": 1,
+        "stop": None
+    }
     try:
-        response = openai.Completion.create(
-            engine="text-davinci-003",
-            prompt=prompt,
-            max_tokens=700,
-            temperature=0.7,
-            n=1,
-            stop=None
-        )
+        response = requests.post("https://api.openai.com/v1/completions", headers=headers, json=data)
+        response.raise_for_status()
+        completion = response.json()
+        raw_text = completion["choices"][0]["text"].strip()
+        cards = []
+        for line in raw_text.split("\n"):
+            if "|" in line and len(cards) < max_cards:
+                front, back = line.split("|", 1)
+                cards.append({"front": front.strip(), "back": back.strip()})
+        if not cards:
+            st.warning("Nenhum flashcard foi gerado pela OpenAI. Tente outro texto ou revise o conteúdo.")
+        return cards
+    except requests.exceptions.HTTPError as e:
+        st.error(f"Erro HTTP da OpenAI API: {e}")
+        return []
     except Exception as e:
-        st.error(f"Erro na API OpenAI: {e}")
+        st.error(f"Erro ao gerar flashcards: {e}")
         return []
 
-    raw_text = response.choices[0].text.strip()
-    cards = []
-    for line in raw_text.split("\n"):
-        if "|" in line:
-            front, back = line.split("|", 1)
-            cards.append({"front": front.strip(), "back": back.strip()})
-    return cards
+# --- Funções para AnkiConnect ---
 
-# --- Função para enviar flashcards para o Anki via AnkiConnect ---
-def send_to_anki(cards: List[Dict], deck_name: str = "Notion Flashcards") -> bool:
-    endpoint = "http://localhost:8765"
+def send_to_anki(cards: List[Dict[str, str]], deck_name: str = "Notion Flashcards", tags: List[str] = []):
+    """
+    Envia flashcards para Anki via AnkiConnect.
+    """
+    if not cards:
+        st.warning("Nenhum flashcard para enviar ao Anki.")
+        return
+
+    # Tenta criar deck (ignora erro se já existir)
+    create_deck_payload = {
+        "action": "createDeck",
+        "version": 6,
+        "params": {"deck": deck_name}
+    }
     try:
-        # Cria deck se não existir
-        requests.post(endpoint, json={
-            "action": "createDeck",
-            "version": 6,
-            "params": {"deck": deck_name}
-        })
+        res_deck = requests.post("http://localhost:8765", json=create_deck_payload)
+        res_deck.raise_for_status()
+        deck_result = res_deck.json()
+        if deck_result.get("error"):
+            st.info(f"Deck pode já existir: {deck_result['error']}")
+    except Exception as e:
+        st.error(f"Erro ao criar deck no Anki: {e}")
+        return
 
-        notes = []
-        for card in cards:
-            notes.append({
-                "deckName": deck_name,
-                "modelName": "Basic",
-                "fields": {
-                    "Front": card["front"],
-                    "Back": card["back"]
-                },
-                "tags": ["notion"]
-            })
-
-        payload = {
-            "action": "addNotes",
+    # Adiciona notas
+    added_count = 0
+    for card in cards:
+        note_payload = {
+            "action": "addNote",
             "version": 6,
-            "params": {"notes": notes}
+            "params": {
+                "note": {
+                    "deckName": deck_name,
+                    "modelName": "Basic",
+                    "fields": {
+                        "Front": card["front"],
+                        "Back": card["back"]
+                    },
+                    "tags": tags
+                }
+            }
         }
-        response = requests.post(endpoint, json=payload)
-        result = response.json()
-        if result.get("error") is None:
-            return True
-        else:
-            st.error(f"Erro do AnkiConnect: {result.get('error')}")
-            return False
-    except requests.exceptions.ConnectionError:
-        st.error("Não foi possível conectar ao Anki. Verifique se o Anki está aberto e o AnkiConnect está instalado e ativado.")
-        return False
-
-# --- Streamlit UI ---
-
-st.set_page_config(page_title="Notion → Anki Flashcards", layout="centered")
-st.title("Notion → Anki Flashcards (Automático + Sincronização)")
-
-# Sidebar para chaves
-openai_api_key = st.sidebar.text_input("Chave OpenAI", type="password", help="Sua API Key da OpenAI")
-notion_api_key = st.sidebar.text_input("Token Notion (opcional)", type="password", help="Seu token Notion (opcional para importação direta)")
-notion_database_id = st.sidebar.text_input("ID Database Notion (opcional)", help="ID do database Notion, se usar API direta")
-
-# Upload múltiplo de arquivos JSON exportados do Notion
-uploaded_files = st.file_uploader("Envie um ou mais arquivos JSON exportados do Notion", type=["json"], accept_multiple_files=True)
-
-if "cards" not in st.session_state:
-    st.session_state.cards = []
-
-# Botão para gerar flashcards
-if st.button("Gerar Flashcards via OpenAI"):
-    if not openai_api_key:
-        st.error("Insira sua chave OpenAI na barra lateral para gerar flashcards.")
-    else:
-        all_texts = []
-        if uploaded_files:
-            for file in uploaded_files:
-                try:
-                    page_json = json.load(file)
-                    text = extract_page_text(page_json)
-                    all_texts.append(text)
-                except Exception as e:
-                    st.warning(f"Erro ao ler arquivo {file.name}: {e}")
-            full_text = "\n\n".join(all_texts)
-        else:
-            full_text = st.text_area("Ou cole o texto para gerar flashcards:", height=200)
-
-        if full_text.strip():
-            with st.spinner("Gerando flashcards..."):
-                cards = generate_flashcards_via_openai(full_text, openai_api_key)
-            if cards:
-                st.session_state.cards = cards
-                st.success(f"{len(cards)} flashcards gerados!")
+        try:
+            res_note = requests.post("http://localhost:8765", json=note_payload)
+            res_note.raise_for_status()
+            note_result = res_note.json()
+            if note_result.get("error"):
+                st.warning(f"Erro ao adicionar nota: {note_result['error']}")
             else:
-                st.warning("Nenhum flashcard foi gerado. Tente com outro texto ou ajuste a API Key.")
+                added_count += 1
+        except Exception as e:
+            st.error(f"Erro ao adicionar nota no Anki: {e}")
+            return
+
+    st.success(f"{added_count} flashcards adicionados ao deck '{deck_name}' com tags {tags}")
+
+# --- Interface Streamlit ---
+
+def main():
+    st.title("Notion para Anki - Flashcards Automáticos")
+
+    st.sidebar.header("Configurações")
+    openai_api_key = st.sidebar.text_input("Chave API OpenAI", type="password")
+    notion_token = st.sidebar.text_input("Token de Integração Notion", type="password")
+    notion_page_id = st.sidebar.text_input("ID da Página do Notion")
+    deck_name = st.sidebar.text_input("Nome do Deck Anki", value="Notion Flashcards")
+
+    st.sidebar.markdown("""
+    **Como obter o Token e o ID do Notion:**
+    - Crie uma integração no Notion e copie o token secreto.
+    - Compartilhe a página com essa integração.
+    - Pegue o ID da página da URL do Notion (parte após https://www.notion.so/).
+    """)
+
+    # Área de upload alternativo (JSON exportado do Notion)
+    uploaded_file = st.file_uploader("Ou envie arquivo JSON exportado da página Notion", type=["json"])
+
+    if st.button("Gerar flashcards automaticamente"):
+        if not openai_api_key:
+            st.error("Por favor, insira a chave API da OpenAI.")
+            return
+        if notion_page_id and notion_token:
+            # Busca dados da página do Notion via API
+            headers = {
+                "Authorization": f"Bearer {notion_token}",
+                "Notion-Version": "2022-06-28",
+                "Content-Type": "application/json"
+            }
+            url = f"https://api.notion.com/v1/blocks/{notion_page_id}/children?page_size=100"
+            try:
+                notion_response = requests.get(url, headers=headers)
+                notion_response.raise_for_status()
+                page_json = notion_response.json()
+                page_text = extract_page_text(page_json)
+            except Exception as e:
+                st.error(f"Erro ao buscar dados do Notion: {e}")
+                return
+        elif uploaded_file:
+            try:
+                page_json = json.load(uploaded_file)
+                page_text = extract_page_text(page_json)
+            except Exception as e:
+                st.error(f"Erro ao ler arquivo JSON: {e}")
+                return
         else:
-            st.warning("Nenhum texto para processar.")
+            st.error("Por favor, forneça a combinação Token + ID do Notion ou faça upload do arquivo JSON.")
+            return
 
-# Exibir flashcards gerados
-if st.session_state.cards:
-    st.subheader("Flashcards gerados")
-    for idx, card in enumerate(st.session_state.cards):
-        st.markdown(f"**Pergunta {idx+1}:** {card['front']}")
-        st.markdown(f"**Resposta:** {card['back']}")
-        st.markdown("---")
+        if not page_text.strip():
+            st.warning("Texto extraído está vazio. Verifique a página do Notion ou o arquivo enviado.")
+            return
 
-    # Botão para enviar ao Anki
-    if st.button("Enviar flashcards para Anki"):
-        with st.spinner("Enviando flashcards para Anki..."):
-            success = send_to_anki(st.session_state.cards)
-        if success:
-            st.success("Flashcards enviados para o Anki com sucesso!")
+        with st.spinner("Gerando flashcards com OpenAI..."):
+            cards = generate_flashcards_from_text(openai_api_key, page_text)
+
+        if cards:
+            st.session_state["cards"] = cards
+            st.success(f"{len(cards)} flashcards gerados.")
+            for i, card in enumerate(cards, 1):
+                st.markdown(f"**Q{i}:** {card['front']}")
+                st.markdown(f"**A{i}:** {card['back']}")
         else:
-            st.error("Falha ao enviar flashcards para o Anki.")
+            st.warning("Nenhum flashcard gerado.")
 
-# Instruções
-st.markdown("""
----
-### Como usar:
+    if "cards" in st.session_state and st.session_state["cards"]:
+        if st.button("Enviar flashcards para Anki"):
+            send_to_anki(st.session_state["cards"], deck_name, tags=[deck_name.replace(" ", "_")])
 
-1. Obtenha sua chave API da OpenAI (gratuita com créditos iniciais).
-2. (Opcional) Insira token e ID do Notion se quiser integrar direto (funcionalidade futura).
-3. Envie arquivos JSON exportados do Notion ou cole o texto manualmente.
-4. Clique em "Gerar Flashcards via OpenAI" para criar os flashcards automaticamente.
-5. Revise os flashcards gerados na tela.
-6. Com o Anki aberto e o AnkiConnect instalado e ativado, clique em "Enviar flashcards para Anki" para sincronizar.
-""")
+if __name__ == "__main__":
+    main()

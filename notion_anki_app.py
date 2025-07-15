@@ -3,8 +3,6 @@ from notion_client import Client
 import openai
 import requests
 from bs4 import BeautifulSoup
-import csv
-import io
 
 # Função para buscar texto da página Notion via API
 def get_notion_page_text(notion, page_id):
@@ -30,7 +28,7 @@ def generate_flashcards(text, openai_api_key, max_cards=10):
     )
     try:
         response = openai.ChatCompletion.create(
-            model="gpt-4",  # Corrigido para usar o modelo correto
+            model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.7,
             max_tokens=1500,
@@ -60,26 +58,9 @@ def extract_text_from_url(url):
         st.error(f"Erro ao acessar URL: {e}")
         return ""
 
-# Função para exportar flashcards para um arquivo CSV
-def export_flashcards_to_csv(flashcards):
-    # Criar um objeto StringIO para armazenar o CSV em memória
-    output = io.StringIO()
-    writer = csv.writer(output)
-    
-    # Cabeçalho do CSV
-    writer.writerow(['Pergunta', 'Resposta'])
-    
-    # Escrever os flashcards no CSV
-    for card in flashcards:
-        writer.writerow([card['question'], card['answer']])
-    
-    # Mover o ponteiro para o início do arquivo
-    output.seek(0)
-    return output
-
 # Interface Streamlit
 def main():
-    st.title("Notion to Flashcards")
+    st.title("Notion to Anki Flashcards")
 
     st.markdown("""
     ### Passo 1: Configuração
@@ -124,16 +105,6 @@ def main():
             for i, card in enumerate(flashcards, 1):
                 st.markdown(f"**{i}. Pergunta:** {card['question']}")
                 st.markdown(f"**Resposta:** {card['answer']}")
-
-            # Exportar os flashcards para um arquivo CSV
-            st.info("Clique no botão abaixo para exportar os flashcards para um arquivo .csv, compatível com o Anki.")
-            csv_file = export_flashcards_to_csv(flashcards)
-            st.download_button(
-                label="Baixar arquivo CSV",
-                data=csv_file,
-                file_name="flashcards_anki.csv",
-                mime="text/csv"
-            )
         else:
             st.error("Não foi possível gerar flashcards.")
 

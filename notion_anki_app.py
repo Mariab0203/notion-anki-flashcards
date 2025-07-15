@@ -1,154 +1,153 @@
 import streamlit as st
-from notion_client import Client
+import json
+import io
 import csv
-from io import StringIO
-import openai
 
-st.set_page_config(page_title="Notion → Anki + IA", layout="centered")
-st.title("🧠 Flashcards: Notion → Anki + IA")
+st.set_page_config(page_title="Notion to Anki Flashcards", layout="wide")
 
-st.warning("""
-⚠️ **Importante:** Nunca compartilhe seu Token do Notion ou Chave da OpenAI com outras pessoas.
-Estes dados são sensíveis e permitem acesso às suas informações privadas.
-Use-os somente para este app e mantenha-os em segurança.
-""")
-
-if 'cards' not in st.session_state:
+if "cards" not in st.session_state:
     st.session_state.cards = []
 
-st.sidebar.header("Configurações de Integração")
+if "page" not in st.session_state:
+    st.session_state.page = 1
 
-openai_api_key = st.sidebar.text_input("🔑 OpenAI API Key (para IA)", type="password")
-if openai_api_key:
-    openai.api_key = openai_api_key
+if "tags" not in st.session_state:
+    st.session_state.tags = set()
 
-st.sidebar.header("⚠️ Avisos de Segurança")
-st.sidebar.info("""
-- Nunca compartilhe seus tokens ou chaves.
-- Dados são usados somente na sessão atual.
-- O app não armazena suas chaves.
-""")
+if "filtered_tags" not in st.session_state:
+    st.session_state.filtered_tags = set()
 
-st.sidebar.header("Obtenha Flashcards de...")
+def reset_app():
+    st.session_state.cards = []
+    st.session_state.page = 1
+    st.session_state.tags = set()
+    st.session_state.filtered_tags = set()
 
-def fetch_from_notion(token, db_id):
-    notion = Client(auth=token)
-    cards = []
-    start_cursor = None
+def extract_flashcards_from_notion(data):
+    flashcards = []
+    def recurse_blocks(blocks):
+        for block in blocks:
+            front = ""
+            back = ""
+            tag = "Notion"
+            if "properties" in block and "title" in block["properties"]:
+                front = block["properties"]["title"][0][0]
+                back = block.get("content", "")
+                flashcards.append({"front": front, "back": back, "tag": tag})
+            if "children" in block:
+                recurse_blocks(block["children"])
+    if "blocks" in data:
+        recurse_blocks(data["blocks"])
+    return flashcards
 
-    # Pega o título do banco de dados para usar como tag
-    db_info = notion.databases.retrieve(database_id=db_id)
-    tag = db_info['title'][0]['plain_text'] if db_info['title'] else "NotionDB"
+with st.sidebar:
+    st.header("1. Dados de Entrada")
+    token = st.text_input("Token Notion (opcional)", type="password", help="Use seu token para buscar DB diretamente")
+    db_id = st.text_input("Database ID Notion (opcional)", help="ID do banco de dados do Notion")
+    uploaded_file = st.file_uploader("Ou envie arquivo JSON exportado do Notion", type=["json"])
+    openai_key = st.text_input("OpenAI API Key (opcional)", type="password")
 
-    while True:
-        query_params = {"database_id": db_id}
-        if start_cursor:
-            query_params["start_cursor"] = start_cursor
-        response = notion.databases.query(**query_params)
-        data = response['results']
-        for r in data:
-            props = r['properties']
-            try:
-                q = props['Pergunta']['title'][0]['text']['content']
-                a = props['Resposta']['rich_text'][0]['text']['content']
-                cards.append((q, a, tag))
-            except:
-                continue
-        if not response.get('has_more'):
-            break
-        start_cursor = response.get('next_cursor')
-    return cards
+    st.markdown("---")
+    st.header("2. Processar")
 
-with st.sidebar.expander("📦 Notion API"):
-    token = st.text_input("Token Notion", type="password", key="notion_token")
-    db_id = st.text_input("ID do Banco de Dados Notion", key="notion_db_id")
-    if st.button("Buscar do Notion"):
-        if token and db_id:
-            try:
-                with st.spinner("Buscando dados no Notion..."):
-                    cards = fetch_from_notion(token, db_id)
-                    st.session_state.cards.extend(cards)
-                    st.success(f"{len(cards)} flashcards adicionados do Notion.")
-            except Exception as e:
-                st.error(f"Erro ao acessar Notion: {e}")
-        else:
-            st.warning("Informe Token e ID do banco de dados.")
+    if st.button("Importar do Notion (não implementado)"):
+        st.warning("Importação via API ainda não disponível neste exemplo.")
 
-with st.sidebar.expander("📁 Upload CSV (Pergunta e Resposta)"):
-    uploaded = st.file_uploader("Envie arquivo CSV", type=['csv'])
-    if uploaded:
+    if uploaded_file:
         try:
-            filename = uploaded.name
-            content = uploaded.getvalue().decode('utf-8')
-            reader = csv.DictReader(StringIO(content))
-            cards = [(row.get('Pergunta',''), row.get('Resposta',''), filename) for row in reader if row.get('Pergunta')]
-            st.session_state.cards.extend(cards)
-            st.success(f"{len(cards)} flashcards adicionados do CSV ({filename}).")
+            data = json.load(uploaded_file)
+            cards_new = extract_flashcards_from_notion(data)
+            if cards_new:
+                st.session_state.cards.extend(cards_new)
+                st.session_state.tags.update(set(card["tag"] for card in cards_new))
+                st.success(f"{len(cards_new)} flashcards importados!")
+            else:
+                st.warning("Nenhum flashcard encontrado no arquivo.")
         except Exception as e:
-            st.error(f"Erro ao processar CSV: {e}")
+            st.error(f"Erro ao processar arquivo JSON: {e}")
 
-with st.sidebar.expander("🤖 Gerar Flashcards com IA"):
-    raw_text = st.text_area("Texto ou Markdown para IA gerar flashcards", height=150)
-    if raw_text and openai_api_key:
-        if st.button("Gerar flashcards com IA"):
-            try:
-                prompt = (
-                    "Você é um assistente que cria flashcards para estudo, no formato:\n"
-                    "Pergunta || Resposta\n\n"
-                    "Gere flashcards claros e diretos baseados no seguinte texto:\n"
-                    f"{raw_text}\n\n"
-                    "Responda somente com flashcards, uma pergunta e resposta por linha, separadas por '||'."
-                )
-                with st.spinner("Gerando flashcards com IA..."):
-                    response = openai.ChatCompletion.create(
-                        model="gpt-3.5-turbo",
-                        messages=[{"role": "user", "content": prompt}],
-                        max_tokens=600,
-                        temperature=0.7,
-                        n=1,
-                    )
-                    text_response = response.choices[0].message.content.strip()
-                    # Tag para IA gerados = "IA"
-                    cards = []
-                    for line in text_response.splitlines():
-                        if '||' in line:
-                            q,a = [s.strip() for s in line.split('||',1)]
-                            cards.append((q,a,"IA"))
-                    st.session_state.cards.extend(cards)
-                    st.success(f"IA gerou {len(cards)} flashcards.")
-            except Exception as e:
-                st.error(f"Erro na geração IA: {e}")
-    elif raw_text:
-        st.info("Informe sua OpenAI API Key para gerar flashcards com IA.")
+    st.markdown("---")
+    st.header("3. Filtrar Flashcards")
+    if st.session_state.tags:
+        selected_tags = st.multiselect("Filtrar por tags", options=sorted(st.session_state.tags), default=sorted(st.session_state.filtered_tags or st.session_state.tags))
+        st.session_state.filtered_tags = set(selected_tags)
+    else:
+        st.info("Sem flashcards para filtrar ainda.")
 
-# --- FILTRO POR TAG ---
+    st.markdown("---")
+    st.header("4. Exportar / Limpar")
+    if st.button("Limpar Tudo", key="clear"):
+        reset_app()
+        st.experimental_rerun()
 
-all_tags = list(set([tag for _,_,tag in st.session_state.cards]))
-selected_tags = st.multiselect("Filtrar flashcards por tags:", options=all_tags, default=all_tags)
+    if st.session_state.cards:
+        def generate_tsv(filtered_cards):
+            output = io.StringIO()
+            writer = csv.writer(output, delimiter="\t")
+            writer.writerow(["Front", "Back", "Tag"])
+            for card in filtered_cards:
+                writer.writerow([card["front"], card["back"], card["tag"]])
+            return output.getvalue()
 
-filtered_cards = [c for c in st.session_state.cards if c[2] in selected_tags]
+        if st.session_state.filtered_tags:
+            filtered_cards = [c for c in st.session_state.cards if c["tag"] in st.session_state.filtered_tags]
+        else:
+            filtered_cards = st.session_state.cards
 
-st.subheader(f"Total de flashcards: {len(filtered_cards)} (filtrados por tags)")
+        tsv_data = generate_tsv(filtered_cards)
+        st.download_button("📥 Exportar flashcards (TSV)", data=tsv_data, file_name="flashcards_anki.txt", mime="text/tab-separated-values")
+    else:
+        st.info("Nenhum flashcard para exportar.")
 
-page_size = 10
-page_num = st.number_input("Página", min_value=1, max_value=max(1, (len(filtered_cards)-1)//page_size+1), step=1)
-start_idx = (page_num - 1) * page_size
-end_idx = start_idx + page_size
+st.title("Flashcards Gerados")
 
-for i, (q,a,tag) in enumerate(filtered_cards[start_idx:end_idx], start=start_idx+1):
-    st.markdown(f"**{i}. Q:** {q}\n> **A:** {a}\n> 🏷️ Tag: `{tag}`")
+CARDS_PER_PAGE = 5
 
-if filtered_cards:
-    output = StringIO()
-    writer = csv.writer(output)
-    writer.writerow(["Pergunta", "Resposta", "Tag"])
-    for q,a,tag in filtered_cards:
-        writer.writerow([q,a,tag])
-    st.download_button(
-        "📥 Baixar CSV para Anki",
-        output.getvalue(),
-        "flashcards_com_tags.csv",
-        "text/csv"
-    )
+if st.session_state.cards:
+    if st.session_state.filtered_tags:
+        display_cards = [c for c in st.session_state.cards if c["tag"] in st.session_state.filtered_tags]
+    else:
+        display_cards = st.session_state.cards
+
+    total_pages = max(1, (len(display_cards) - 1) // CARDS_PER_PAGE + 1)
+    page = st.session_state.page
+
+    if page > total_pages:
+        st.session_state.page = total_pages
+        page = total_pages
+
+    start_idx = (page - 1) * CARDS_PER_PAGE
+    end_idx = start_idx + CARDS_PER_PAGE
+
+    st.write(f"Exibindo flashcards {start_idx+1} a {min(end_idx, len(display_cards))} de {len(display_cards)}")
+
+    for i, card in enumerate(display_cards[start_idx:end_idx], start=start_idx+1):
+        st.markdown(
+            f"""
+            <div style='
+                border: 1px solid #ddd; 
+                padding: 15px; 
+                margin-bottom: 10px; 
+                border-radius: 8px;
+                background-color: #f9f9f9;'>
+                <strong>{i}. Pergunta:</strong> {card['front']}<br>
+                <strong>Resposta:</strong> {card['back']}<br>
+                <small>🏷️ Tag: <code>{card['tag']}</code></small>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    col1, col2, col3 = st.columns([1,2,1])
+    with col1:
+        if st.button("⬅️ Anterior") and page > 1:
+            st.session_state.page -= 1
+            st.experimental_rerun()
+    with col2:
+        st.markdown(f"<center>Página {page} de {total_pages}</center>", unsafe_allow_html=True)
+    with col3:
+        if st.button("Próximo ➡️") and page < total_pages:
+            st.session_state.page += 1
+            st.experimental_rerun()
 else:
-    st.info("Nenhum flashcard disponível para exportar.")
+    st.info("Nenhum flashcard gerado ou importado ainda.")

@@ -1,136 +1,112 @@
 import streamlit as st
+from notion_client import Client
+import openai
 import requests
-import json
-import re
-import time
-from typing import List, Dict, Optional
-from anki_export import Collection, Note
+from bs4 import BeautifulSoup
 
-# Função para extrair texto de uma página pública Notion (API pública)
-def fetch_notion_page_text(url: str) -> Optional[str]:
+# Função para buscar texto da página Notion via API
+def get_notion_page_text(notion, page_id):
     try:
-        # Tentativa de extrair conteúdo da página Notion via scraping simples (se pública)
-        # Alternativa para API oficial (mais complexa)
-        response = requests.get(url)
-        if response.status_code != 200:
-            st.error(f"Não foi possível acessar a página Notion. Código HTTP: {response.status_code}")
-            return None
-        html = response.text
-
-        # Regex para extrair conteúdo textual da página (simplificado)
-        # Busca por conteúdo dentro de <p>, <h1>-<h6>, <li> etc para montar texto bruto
-        paragraphs = re.findall(r'<p.*?>(.*?)<\/p>', html, flags=re.DOTALL)
-        headers = re.findall(r'<h[1-6].*?>(.*?)<\/h[1-6]>', html, flags=re.DOTALL)
-        list_items = re.findall(r'<li.*?>(.*?)<\/li>', html, flags=re.DOTALL)
-
-        # Juntando tudo
-        text_pieces = headers + paragraphs + list_items
-        text_clean = "\n\n".join([re.sub('<.*?>', '', t).strip() for t in text_pieces if t.strip() != ''])
-
-        return text_clean if text_clean else None
+        blocks = notion.blocks.children.list(page_id)['results']
+        texts = []
+        for block in blocks:
+            if block['type'] == 'paragraph':
+                paragraph = block['paragraph']
+                texts.append(''.join([text['plain_text'] for text in paragraph['text']]))
+        return '\n'.join(texts)
     except Exception as e:
-        st.error(f"Erro ao tentar extrair texto: {e}")
-        return None
+        st.error(f"Erro ao acessar Notion: {e}")
+        return ""
 
-# Função para criar flashcards (básico: divide texto em blocos)
-def generate_flashcards(text: str, max_cards: int = 20) -> List[Dict[str, str]]:
-    # Divide o texto em blocos aproximados para gerar flashcards
-    # Pode melhorar com NLP para perguntas e respostas
+# Função para gerar flashcards usando OpenAI GPT
+def generate_flashcards(text, openai_api_key, max_cards=10):
+    openai.api_key = openai_api_key
+    prompt = (
+        "Crie flashcards de perguntas e respostas a partir do texto abaixo. "
+        f"Crie até {max_cards} flashcards, com perguntas claras e respostas detalhadas:\n\n{text}\n\n"
+        "Formato: Pergunta: ... Resposta: ..."
+    )
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7,
+            max_tokens=1500,
+        )
+        content = response['choices'][0]['message']['content']
+        flashcards = []
+        for line in content.split('\n'):
+            if line.strip().startswith("Pergunta:"):
+                question = line.strip().replace("Pergunta:", "").strip()
+                flashcards.append({"question": question, "answer": ""})
+            elif line.strip().startswith("Resposta:") and flashcards:
+                flashcards[-1]['answer'] = line.strip().replace("Resposta:", "").strip()
+        return flashcards
+    except Exception as e:
+        st.error(f"Erro na geração dos flashcards: {e}")
+        return []
 
-    # Divide em parágrafos
-    paragraphs = [p.strip() for p in text.split('\n') if p.strip()]
-    cards = []
+# Função para extrair texto de página web (ex: página Notion publicada)
+def extract_text_from_url(url):
+    try:
+        response = requests.get(url)
+        soup = BeautifulSoup(response.text, "html.parser")
+        # Extrai texto visível da página
+        texts = soup.stripped_strings
+        return '\n'.join(texts)
+    except Exception as e:
+        st.error(f"Erro ao acessar URL: {e}")
+        return ""
 
-    # Limita para max_cards
-    step = max(1, len(paragraphs) // max_cards)
+# Interface Streamlit
+def main():
+    st.title("Notion to Anki Flashcards")
 
-    for i in range(0, len(paragraphs), step):
-        front = paragraphs[i][:100] + '...' if len(paragraphs[i]) > 100 else paragraphs[i]
-        # verso é o próximo parágrafo ou concatenação dos próximos
-        verso_parts = paragraphs[i+1:i+step+1] if (i+1) < len(paragraphs) else []
-        verso = "\n\n".join(verso_parts) if verso_parts else "Definição/explicação aqui."
-        cards.append({"front": front, "back": verso})
-        if len(cards) >= max_cards:
-            break
-    return cards
+    st.markdown("""
+    ### Passo 1: Configuração
 
-# Exporta flashcards para CSV compatível com Anki
-def export_to_csv(cards: List[Dict[str, str]], filename: str):
-    import csv
-    with open(filename, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        writer.writerow(['Frente', 'Verso'])
-        for card in cards:
-            writer.writerow([card['front'], card['back']])
-    return filename
+    - Informe o **Notion Integration Token** e o **ID da página** (ou URL pública do Notion).
+    - Informe sua chave **OpenAI API Key** para geração automática dos flashcards.
+    """)
 
-# Exporta flashcards para .apkg usando anki_export
-def export_to_apkg(cards: List[Dict[str, str]], deck_name: str = "Notion Flashcards") -> str:
-    col = Collection(deck_name)
-    for card in cards:
-        note = Note(front=card['front'], back=card['back'])
-        col.add_note(note)
-    filename = f"{deck_name.replace(' ', '_')}.apkg"
-    col.save(filename)
-    return filename
+    notion_token = st.text_input("Notion Integration Token", type="password")
+    notion_page_id_or_url = st.text_input("Notion Page ID ou URL pública")
+    openai_api_key = st.text_input("OpenAI API Key", type="password")
+    max_cards = st.slider("Número máximo de flashcards", 1, 30, 10)
 
-# --- Streamlit app ---
+    if st.button("Gerar Flashcards"):
+        if not notion_token or not notion_page_id_or_url or not openai_api_key:
+            st.error("Preencha todos os campos!")
+            return
 
-st.set_page_config(page_title="Notion to Anki Flashcards", layout='centered')
+        # Instanciar client Notion
+        notion = Client(auth=notion_token)
 
-st.title("🧠 Notion para Flashcards Anki")
-st.markdown("""
-Insira o link público de uma página do Notion para extrair o texto e criar flashcards automáticos.
-""")
+        # Detectar se o input é URL pública ou apenas ID da página
+        if notion_page_id_or_url.startswith("http"):
+            st.info("Extraindo texto da URL pública do Notion...")
+            text = extract_text_from_url(notion_page_id_or_url)
+        else:
+            st.info("Extraindo texto via API do Notion...")
+            text = get_notion_page_text(notion, notion_page_id_or_url)
 
-# Entrada da URL do Notion
-notion_url = st.text_input("URL da página pública do Notion")
+        if not text:
+            st.error("Não foi possível extrair texto da página Notion.")
+            return
 
-# Opção de número máximo de flashcards
-max_cards = st.slider("Número máximo de flashcards a criar", min_value=5, max_value=50, value=20)
+        st.write("Texto extraído (resumo):")
+        st.write(text[:1000] + "..." if len(text) > 1000 else text)
 
-# Opção para exportar
-export_format = st.radio("Formato para exportar:", options=[".apkg (Anki)", ".csv"])
+        st.info("Gerando flashcards com OpenAI GPT...")
+        flashcards = generate_flashcards(text, openai_api_key, max_cards)
 
-# Botão para iniciar o processo
-if st.button("Gerar flashcards"):
-    if not notion_url.strip():
-        st.warning("Por favor, insira um URL válido do Notion.")
-    else:
-        with st.spinner("Extraindo texto da página..."):
-            text = fetch_notion_page_text(notion_url)
-            if text:
-                st.success("Texto extraído com sucesso!")
-                with st.expander("Visualizar texto extraído"):
-                    st.write(text[:3000] + ("..." if len(text) > 3000 else ""))
+        if flashcards:
+            st.success(f"{len(flashcards)} flashcards gerados:")
+            for i, card in enumerate(flashcards, 1):
+                st.markdown(f"**{i}. Pergunta:** {card['question']}")
+                st.markdown(f"**Resposta:** {card['answer']}")
+        else:
+            st.error("Não foi possível gerar flashcards.")
 
-                st.info("Gerando flashcards...")
-                cards = generate_flashcards(text, max_cards=max_cards)
-                st.success(f"{len(cards)} flashcards gerados!")
-
-                with st.expander("Visualizar flashcards gerados"):
-                    for i, card in enumerate(cards, 1):
-                        st.markdown(f"**Frente {i}:** {card['front']}")
-                        st.markdown(f"**Verso {i}:** {card['back']}\n---")
-
-                # Exportar
-                if export_format == ".csv":
-                    filename = "flashcards.csv"
-                    export_to_csv(cards, filename)
-                    with open(filename, "rb") as f:
-                        st.download_button("Download CSV", f, file_name=filename, mime="text/csv")
-                else:
-                    filename = export_to_apkg(cards)
-                    with open(filename, "rb") as f:
-                        st.download_button("Download Anki (.apkg)", f, file_name=filename, mime="application/octet-stream")
-            else:
-                st.error("Não foi possível extrair texto da página. Verifique se a página está pública e o URL correto.")
-
-st.markdown("---")
-st.markdown("""
-**Notas importantes:**
-
-- Certifique-se que a página Notion está pública para que o app consiga ler o conteúdo.
-- A extração do texto é simplificada e pode não preservar toda a formatação original.
-- A geração dos flashcards é automática, com base em blocos de texto — pode ser aprimorada futuramente.
-""")
+if __name__ == "__main__":
+    main()

@@ -7,6 +7,7 @@ import genanki
 import pandas as pd
 import yaml
 import uuid
+import tiktoken  # import novo
 
 # Configurações da página
 st.set_page_config(page_title="Flashcards Markdown → Anki", layout="wide")
@@ -24,6 +25,7 @@ openai.api_key = st.secrets["OPENAI_API_KEY"]
 # Upload de arquivo .zip
 uploaded_file = st.file_uploader("📁 Envie o arquivo `.zip` exportado do Notion em Markdown:", type="zip")
 max_cards = st.slider("Máximo de flashcards por bloco:", 1, 5, 3)
+limite_tokens = st.slider("Limite de tokens por bloco para envio ao OpenAI:", 200, 1500, 1000)
 
 
 def extrair_texto_do_zip(zip_file):
@@ -44,20 +46,27 @@ def extrair_texto_do_zip(zip_file):
     return textos
 
 
-def dividir_em_blocos(textos, limite=1000):
+def dividir_em_blocos(textos, limite_tokens=1000):
     """
-    Divide os textos em blocos menores para envio à API, baseando-se em tamanho (caracteres).
+    Divide os textos em blocos menores para envio à API, baseando-se em tokens, não caracteres.
     """
+    encoding = tiktoken.encoding_for_model("gpt-3.5-turbo")
     blocos = []
+
     for texto in textos:
         parags = texto.split('\n\n')
         atual = ''
+        atual_tokens = 0
+
         for p in parags:
-            if len(atual) + len(p) < limite:
+            p_tokens = len(encoding.encode(p))
+            if atual_tokens + p_tokens < limite_tokens:
                 atual += p + '\n\n'
+                atual_tokens += p_tokens
             else:
                 blocos.append(atual.strip())
                 atual = p + '\n\n'
+                atual_tokens = p_tokens
         if atual:
             blocos.append(atual.strip())
     return blocos
@@ -164,7 +173,7 @@ if uploaded_file and st.button("🚀 Gerar Flashcards"):
         st.error("Nenhum arquivo markdown (.md) encontrado no zip.")
         st.stop()
 
-    blocos = dividir_em_blocos(textos)
+    blocos = dividir_em_blocos(textos, limite_tokens)
     st.info(f"{len(blocos)} blocos serão processados.")
 
     flashcards = gerar_flashcards(blocos, max_cards)
@@ -196,4 +205,3 @@ if uploaded_file and st.button("🚀 Gerar Flashcards"):
 
     else:
         st.warning("Nenhum flashcard válido foi gerado. Tente ajustar os parâmetros ou o conteúdo.")
-

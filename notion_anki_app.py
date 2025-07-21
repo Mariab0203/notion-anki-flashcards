@@ -21,6 +21,8 @@ if senha != st.secrets.get("APP_PASSWORD"):
     st.stop()
 
 client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+st.write("🔑 Chave OpenAI carregada:", st.secrets.get("OPENAI_API_KEY", "Não encontrada"))
+
 
 # ========== PROMPT ==========
 PROMPT_SISTEMA_BASE = """

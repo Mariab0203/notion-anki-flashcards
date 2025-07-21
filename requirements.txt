@@ -1,6 +1,5 @@
 streamlit
-requests
-pandas
-genanki
 openai
+genanki
 pyyaml
+pandas

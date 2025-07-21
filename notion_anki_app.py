@@ -4,7 +4,7 @@ from openai import OpenAI
 # ... seu código anterior ...
 
 # Inicializa o cliente OpenAI com a chave dos secrets
-client = OpenAI(api_key=st.secrets["sk-...Zd4A"]
+client = OpenAI(api_key=st.secrets["sk-...Zd4A"])
 # --- TESTE TEMPORÁRIO DA API OPENAI ---
 st.markdown("### 🔍 Teste rápido da API OpenAI")
 try:

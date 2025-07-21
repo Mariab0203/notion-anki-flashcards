@@ -2,27 +2,27 @@ import streamlit as st
 import zipfile
 import os
 import tempfile
-import openai
 import genanki
 import pandas as pd
 import yaml
 import uuid
 import tiktoken
 import time
+from openai import OpenAI
 
-# CONFIGURAÇÃO INICIAL
+# ========== CONFIGURAÇÕES ==========
 st.set_page_config(page_title="Flashcards Notion → Anki", layout="wide")
 st.title("🧠 Gerador de Flashcards para Residência Médica")
 
-# AUTENTICAÇÃO
+# ========== AUTENTICAÇÃO ==========
 senha = st.text_input("🔐 Digite a senha:", type="password")
 if senha != st.secrets.get("APP_PASSWORD"):
     st.error("Senha incorreta.")
     st.stop()
 
-openai.api_key = st.secrets["OPENAI_API_KEY"]
+client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
-# PROMPT SISTEMA
+# ========== PROMPT ==========
 PROMPT_SISTEMA_BASE = """
 Você é um assistente especializado em gerar flashcards de alta qualidade para revisão de conteúdos médicos, focado em residência médica.
 
@@ -36,7 +36,7 @@ Gere até {max_cards} flashcards por bloco com o seguinte formato YAML:
 Não repita perguntas. Use toda a informação relevante. Mantenha formato limpo e válido em YAML.
 """
 
-# ENTRADAS DO USUÁRIO
+# ========== ENTRADAS ==========
 uploaded_file = st.file_uploader("📁 Envie o `.zip` exportado do Notion:", type="zip")
 limite_tokens = st.slider("🔢 Tokens por bloco", 300, 1500, 1000)
 limite_flashcards_totais = st.slider("📦 Máximo total de flashcards", 10, 300, 100)
@@ -44,7 +44,7 @@ limite_flashcards_totais = st.slider("📦 Máximo total de flashcards", 10, 300
 exportar_csv = st.checkbox("⬇️ Exportar CSV", value=True)
 exportar_apkg = st.checkbox("⬇️ Exportar APKG (Anki)", value=True)
 
-# FUNÇÕES AUXILIARES
+# ========== FUNÇÕES AUXILIARES ==========
 
 @st.cache_data(show_spinner=False)
 def extrair_texto_do_zip(zip_file_bytes):
@@ -90,7 +90,6 @@ def filtrar_flashcards_duplicados(flashcards):
             unicos.append((f, b))
     return unicos
 
-# 🔁 GERAÇÃO DOS FLASHCARDS COM DEBUG
 def gerar_flashcards(blocos, limite_total_flashcards, max_retries=2):
     flashcards = []
     progresso = st.progress(0)
@@ -121,7 +120,7 @@ Conteúdo:
         retry = 0
         while retry <= max_retries:
             try:
-                resposta = openai.ChatCompletion.create(
+                resposta = client.chat.completions.create(
                     model="gpt-3.5-turbo",
                     messages=[
                         {"role": "system", "content": system_prompt},
@@ -184,7 +183,7 @@ def salvar_apkg(flashcards):
     genanki.Package(deck).write_to_file(path)
     return path
 
-# PROCESSAMENTO
+# ========== EXECUÇÃO ==========
 if uploaded_file and st.button("🚀 Gerar Flashcards"):
     start = time.time()
 

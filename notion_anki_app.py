@@ -1,207 +1,135 @@
 import streamlit as st
 import requests
-from bs4 import BeautifulSoup
-import re
-import os
-import tempfile
-import genanki  # para criar pacotes Anki
-from openai import OpenAI
+import pandas as pd
+import genanki
+import uuid
 import openai
+import time
 
-# --- Funções auxiliares ---
+# CONFIGURAÇÃO DA API
+api_key = st.secrets.get("OPENAI_API_KEY") or st.text_input("Sua chave da OpenAI", type="password")
+if api_key:
+    openai.api_key = api_key
 
-def extrair_texto_notion_publico(url):
+st.title("🧠 Gerador de Flashcards com IA (Notion → Anki)")
+
+url = st.text_input("URL pública do arquivo de texto (.txt) exportado do Notion")
+
+def baixar_texto(url):
     try:
-        resp = requests.get(url)
-        resp.raise_for_status()
+        resposta = requests.get(url)
+        resposta.raise_for_status()
+        return resposta.text
     except Exception as e:
-        st.error(f"Erro ao acessar a URL: {e}")
+        st.error(f"Erro ao baixar o arquivo: {e}")
         return None
 
-    soup = BeautifulSoup(resp.text, "html.parser")
-    for s in soup(["script", "style", "noscript"]):
-        s.decompose()
-    texto = soup.get_text(separator="\n")
-    linhas = [l.strip() for l in texto.splitlines() if l.strip()]
-    return "\n\n".join(linhas)
+def dividir_em_paragrafos(texto, limite=800):
+    paragrafos = texto.split("\n")
+    blocos = []
+    bloco_atual = ""
+    for p in paragrafos:
+        if not p.strip():
+            continue
+        if len(bloco_atual) + len(p) < limite:
+            bloco_atual += " " + p.strip()
+        else:
+            blocos.append(bloco_atual.strip())
+            bloco_atual = p.strip()
+    if bloco_atual:
+        blocos.append(bloco_atual.strip())
+    return blocos
 
-def dividir_por_titulos(texto, nivel=2):
-    """
-    Divide texto em seções usando títulos no padrão Markdown ## ou H2 equivalente.
-    Retorna dict {titulo: texto_seção}
-    """
-    # Exemplo de regex para títulos no estilo '## Título' ou 'Título em linha separada'
-    # Como a página do Notion pode não ter markdown, tentaremos separar por linhas em MAIÚSCULAS ou com padrão CIR 1
-    pattern = re.compile(r"^(CIR\s*\d+.*)$", re.MULTILINE | re.IGNORECASE)
+def gerar_flashcards_ia(blocos, modelo="gpt-3.5-turbo"):
+    flashcards = []
+    for i, bloco in enumerate(blocos):
+        prompt = f"""
+A partir do texto abaixo, crie 1 flashcard com uma pergunta e uma resposta direta e precisa.
 
-    # Divide pelo padrão
-    indices = [(m.start(), m.group(1).strip()) for m in pattern.finditer(texto)]
+Texto:
+\"\"\"
+{bloco}
+\"\"\"
 
-    secoes = {}
-    if not indices:
-        # Nenhuma seção encontrada, retorna tudo
-        secoes["Conteúdo Completo"] = texto
-        return secoes
+Formato:
+Pergunta: <pergunta>
+Resposta: <resposta>
+"""
 
-    for i, (pos, titulo) in enumerate(indices):
-        start = pos
-        end = indices[i+1][0] if i+1 < len(indices) else len(texto)
-        conteudo = texto[start:end].strip()
-        secoes[titulo] = conteudo
+        try:
+            resposta = openai.ChatCompletion.create(
+                model=modelo,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.5
+            )
 
-    return secoes
+            conteudo = resposta.choices[0].message.content
+            linhas = conteudo.strip().split("\n")
+            pergunta = next((l.replace("Pergunta:", "").strip() for l in linhas if "Pergunta:" in l), None)
+            resposta_card = next((l.replace("Resposta:", "").strip() for l in linhas if "Resposta:" in l), None)
 
-def gerar_flashcards(texto, openai_api_key, max_cards=10):
-    """
-    Envia o texto para OpenAI gerar flashcards no formato Q/A.
-    Limita a max_cards para não estourar tokens.
-    """
-    openai.api_key = openai_api_key
+            if pergunta and resposta_card:
+                flashcards.append((pergunta, resposta_card))
 
-    prompt = (
-        f"Divida o texto abaixo em até {max_cards} flashcards de perguntas e respostas, "
-        "com perguntas claras e respostas detalhadas. Use formato:\n"
-        "Pergunta: ...\nResposta: ...\n\n"
-        f"Texto:\n{texto}\n\n"
+            time.sleep(1.1)  # evitar rate limit
+        except Exception as e:
+            st.warning(f"Erro ao gerar flashcard {i+1}: {e}")
+            continue
+
+    return flashcards
+
+def salvar_em_csv(flashcards):
+    df = pd.DataFrame(flashcards, columns=["Front", "Back"])
+    df.to_csv("flashcards_para_anki.csv", sep="\t", index=False)
+    return "flashcards_para_anki.csv"
+
+def gerar_pacote_anki(flashcards):
+    model_id = uuid.uuid4().int >> 96
+    my_model = genanki.Model(
+        model_id,
+        'Modelo IA',
+        fields=[{'name': 'Front'}, {'name': 'Back'}],
+        templates=[{
+            'name': 'Card 1',
+            'qfmt': '{{Front}}',
+            'afmt': '{{Back}}',
+        }]
     )
 
-    try:
-        response = openai.Completion.create(
-            model="text-davinci-003",
-            prompt=prompt,
-            max_tokens=1500,
-            temperature=0.5,
-            n=1,
-            stop=None,
-        )
-        resultado = response.choices[0].text.strip()
-        return resultado
-    except Exception as e:
-        st.error(f"Erro na geração de flashcards: {e}")
-        return None
+    deck_id = uuid.uuid4().int >> 96
+    my_deck = genanki.Deck(deck_id, 'Flashcards IA Notion')
 
-def parse_flashcards(raw_text):
-    """
-    Transforma texto bruto da IA em lista de dicts {question, answer}
-    Espera formato:
-    Pergunta: ...
-    Resposta: ...
-    """
-    cards = []
-    blocos = raw_text.split("\n\n")
-    for bloco in blocos:
-        q_match = re.search(r"Pergunta:\s*(.*)", bloco, re.IGNORECASE)
-        a_match = re.search(r"Resposta:\s*(.*)", bloco, re.IGNORECASE | re.DOTALL)
-        if q_match and a_match:
-            question = q_match.group(1).strip()
-            answer = a_match.group(1).strip()
-            cards.append({"question": question, "answer": answer})
-    return cards
+    for front, back in flashcards:
+        note = genanki.Note(model=my_model, fields=[front, back])
+        my_deck.add_note(note)
 
-def criar_anki_decks(cards, deck_name="Flashcards Notion"):
-    """
-    Cria um arquivo .apkg com os flashcards gerados.
-    """
-    deck_id = int(abs(hash(deck_name)) % (10 ** 10))
-    deck = genanki.Deck(deck_id, deck_name)
-    modelo = genanki.Model(
-        1607392319,
-        'Simple Model',
-        fields=[
-            {'name': 'Question'},
-            {'name': 'Answer'},
-        ],
-        templates=[
-            {
-                'name': 'Card 1',
-                'qfmt': '{{Question}}',
-                'afmt': '{{FrontSide}}<hr id="answer">{{Answer}}',
-            },
-        ])
+    arquivo_saida = 'flashcards_gerados.apkg'
+    genanki.Package(my_deck).write_to_file(arquivo_saida)
+    return arquivo_saida
 
-    for card in cards:
-        note = genanki.Note(
-            model=modelo,
-            fields=[card["question"], card["answer"]],
-        )
-        deck.add_note(note)
+if url and api_key:
+    texto = baixar_texto(url)
 
-    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".apkg")
-    genanki.Package(deck).write_to_file(temp_file.name)
-    return temp_file.name
+    if texto:
+        st.subheader("Texto obtido")
+        st.text_area("Conteúdo", texto[:2000] + "...", height=300)
 
+        blocos = dividir_em_paragrafos(texto)
 
-# --- Streamlit App ---
+        st.info(f"{len(blocos)} blocos de texto detectados para geração de flashcards.")
+        if st.button("🔁 Gerar Flashcards com IA"):
+            with st.spinner("Gerando flashcards com IA..."):
+                flashcards = gerar_flashcards_ia(blocos)
 
-st.title("Flashcards Automáticos do Notion para Anki")
+            st.success(f"{len(flashcards)} flashcards gerados com sucesso!")
 
-st.markdown("""
-Este app lê uma página pública do Notion, extrai o texto, divide por seções, e gera flashcards automaticamente com IA.
-""")
+            for front, back in flashcards:
+                st.markdown(f"**Q:** {front}\n\n**A:** {back}\n---")
 
-url = st.text_input("Cole a URL pública da página do Notion aqui:")
-filtro_secao = st.text_input("Filtro de seção (ex: CIR 1 - SÍNDROMES DE HIPERTENSÃO PORTA) (opcional):")
+            arquivo_csv = salvar_em_csv(flashcards)
+            with open(arquivo_csv, "rb") as f:
+                st.download_button("⬇️ Baixar CSV para Anki", f, file_name=arquivo_csv, mime="text/csv")
 
-openai_api_key = st.text_input("Sua OpenAI API Key (começa com sk-):", type="password")
-
-max_cards = st.slider("Número máximo de flashcards a criar:", min_value=1, max_value=20, value=10)
-
-if st.button("Gerar Flashcards"):
-
-    if not url:
-        st.error("Por favor, insira a URL pública do Notion.")
-    elif not openai_api_key:
-        st.error("Por favor, insira sua chave API da OpenAI.")
-    else:
-        with st.spinner("Extraindo texto da página..."):
-            texto_completo = extrair_texto_notion_publico(url)
-        if texto_completo is None:
-            st.stop()
-
-        secoes = dividir_por_titulos(texto_completo)
-        st.write(f"Seções encontradas: {list(secoes.keys())}")
-
-        if filtro_secao:
-            # tenta encontrar seção pelo filtro (case insensitive)
-            secao_texto = None
-            for titulo, conteudo in secoes.items():
-                if filtro_secao.lower() in titulo.lower():
-                    secao_texto = conteudo
-                    st.write(f"Usando seção filtrada: {titulo}")
-                    break
-            if not secao_texto:
-                st.warning("Seção filtro não encontrada. Usando conteúdo completo.")
-                secao_texto = texto_completo
-        else:
-            secao_texto = texto_completo
-
-        with st.spinner("Gerando flashcards via OpenAI..."):
-            flashcards_bruto = gerar_flashcards(secao_texto, openai_api_key, max_cards=max_cards)
-
-        if not flashcards_bruto:
-            st.error("Não foi possível gerar flashcards.")
-            st.stop()
-
-        cards = parse_flashcards(flashcards_bruto)
-
-        if not cards:
-            st.error("Nenhum flashcard válido foi gerado.")
-            st.stop()
-
-        st.success(f"{len(cards)} flashcards gerados!")
-
-        for i, card in enumerate(cards, 1):
-            st.markdown(f"**Pergunta {i}:** {card['question']}")
-            st.markdown(f"Resposta: {card['answer']}")
-
-        with st.spinner("Criando arquivo Anki (.apkg)..."):
-            arq_anki = criar_anki_decks(cards)
-            st.success("Arquivo Anki criado!")
-
-        with open(arq_anki, "rb") as f:
-            st.download_button(
-                label="Download do arquivo Anki (.apkg)",
-                data=f,
-                file_name="flashcards_notion.apkg",
-                mime="application/octet-stream",
-            )
+            arquivo_apkg = gerar_pacote_anki(flashcards)
+            with open(arquivo_apkg, "rb") as f:
+                st.download_button("⬇️ Baixar Pacote .apkg", f, file_name=arquivo_apkg, mime="application/octet-stream")

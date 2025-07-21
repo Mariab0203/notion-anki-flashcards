@@ -4,32 +4,34 @@ import pandas as pd
 import genanki
 import uuid
 import openai
+import yaml
 import time
 
 st.set_page_config(page_title="Notion → Flashcards IA", layout="wide")
 st.title("🧠 Gerador Inteligente de Flashcards (Notion → Anki)")
 
-# Configurar chave da OpenAI: primeiro tenta o secrets.toml, depois input manual
-api_key = st.secrets.get("OPENAI_API_KEY") or st.text_input("🔑 Insira sua chave da OpenAI:", type="password")
-if not api_key:
-    st.warning("Por favor, insira sua chave da OpenAI para continuar.")
+# --- Autenticação simples ---
+password = st.text_input("🔒 Senha para acessar o app:", type="password")
+if password != st.secrets.get("APP_PASSWORD"):
+    st.error("Senha incorreta! Acesso negado.")
     st.stop()
 
-openai.api_key = api_key
+# --- Configuração da chave OpenAI ---
+openai_api_key = st.secrets.get("OPENAI_API_KEY")
+if not openai_api_key:
+    st.error("Chave OPENAI_API_KEY não configurada nos Secrets.")
+    st.stop()
+openai.api_key = openai_api_key
 
-# --- O resto do código continua igual ---
-# Input de URL e máximo de cards por bloco
+# Input do usuário
 url = st.text_input("URL pública do arquivo de texto exportado do Notion (.txt)")
 max_cards = st.slider("Máximo de flashcards por bloco", min_value=1, max_value=5, value=3)
 
+@st.cache_data(show_spinner=False)
 def baixar_texto(url):
-    try:
-        resp = requests.get(url, timeout=10)
-        resp.raise_for_status()
-        return resp.text
-    except Exception as e:
-        st.error(f"Erro ao baixar arquivo: {e}")
-        return None
+    resp = requests.get(url, timeout=10)
+    resp.raise_for_status()
+    return resp.text
 
 def dividir_em_blocos(texto, limite=800):
     parags = [p.strip() for p in texto.split("\n\n") if p.strip()]
@@ -45,22 +47,21 @@ def dividir_em_blocos(texto, limite=800):
         blocos.append(cur)
     return blocos
 
+@st.cache_data(show_spinner=False)
 def gerar_flashcards_ia(blocos, max_cards, modelo="gpt-3.5-turbo"):
     flashcards = []
     total = len(blocos)
-    bar = st.progress(0)
     for idx, bloco in enumerate(blocos):
         prompt = f"""
-A partir do texto abaixo, gere até {max_cards} flashcards que cubram T O D A S as informações importantes, com:
-Pergunta: <pergunta>
-Resposta: <resposta>
-Formato YAML: 
+A partir do texto abaixo, gere até {max_cards} flashcards únicos, que não repitam perguntas ou respostas já criadas, cobrindo todas as informações relevantes.
+Formato YAML:
 - pergunta: ...
   resposta: ...
 Texto:
 \"\"\"
 {bloco}
 \"\"\"
+Evite perguntas repetidas ou redundantes. Seja claro e conciso.
 """
         try:
             resp = openai.ChatCompletion.create(
@@ -69,20 +70,17 @@ Texto:
                 temperature=0.4,
             )
             conteudo = resp.choices[0].message.content
-            # Parse simples do YAML (assumindo padrão - pergunta: ... resposta: ...)
-            q, a = None, None
-            for line in conteudo.strip().split("\n"):
-                line = line.strip()
-                if line.lower().startswith("- pergunta:"):
-                    q = line.split(":",1)[1].strip()
-                elif line.lower().startswith("resposta:") or line.lower().startswith("  resposta:"):
-                    a = line.split(":",1)[1].strip()
+            # Parse YAML com PyYAML
+            cards_yaml = yaml.safe_load(conteudo)
+            if isinstance(cards_yaml, list):
+                for card in cards_yaml:
+                    q = card.get("pergunta")
+                    a = card.get("resposta")
                     if q and a:
                         flashcards.append((q, a))
-                        q, a = None, None
         except Exception as e:
             st.warning(f"Erro no bloco {idx+1}: {e}")
-        bar.progress((idx + 1) / total)
+        st.progress((idx + 1) / total)
         time.sleep(1.1)
     return flashcards
 
@@ -110,8 +108,8 @@ if st.button("Processar Notion"):
     if not url:
         st.error("Cole a URL do arquivo .txt do Notion.")
     else:
-        txt = baixar_texto(url)
-        if txt:
+        try:
+            txt = baixar_texto(url)
             st.subheader("📄 Conteúdo completo")
             st.text_area("", txt, height=400)
             blocos = dividir_em_blocos(txt)
@@ -131,3 +129,10 @@ if st.button("Processar Notion"):
                 st.download_button("⬇️ Baixar CSV", f, file_name=csv, mime="text/csv")
             with open(apkg,"rb") as f:
                 st.download_button("⬇️ Baixar APKG", f, file_name=apkg, mime="application/octet-stream")
+
+        except Exception as e:
+            st.error(f"Erro geral: {e}")
+
+if st.button("Limpar cache"):
+    st.cache_data.clear()
+    st.success("Cache limpo!")

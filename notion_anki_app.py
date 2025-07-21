@@ -23,8 +23,8 @@ if senha != st.secrets.get("APP_PASSWORD"):
 # OpenAI API
 openai.api_key = st.secrets["OPENAI_API_KEY"]
 
-# Prompt robusto para geração de flashcards
-PROMPT_SISTEMA = """
+# Prompt base para geração de flashcards
+PROMPT_SISTEMA_BASE = """
 Você é um assistente especializado em gerar flashcards de alta qualidade para revisão de conteúdos médicos, focado em residência médica.
 
 Sua única fonte de informação é o texto fornecido no prompt do usuário. Você não deve adicionar informações externas ou inventar dados.
@@ -49,15 +49,18 @@ Não inclua nada além da lista YAML de flashcards conforme descrito.
 # Upload de .zip com arquivos .md
 uploaded_file = st.file_uploader("📁 Envie o arquivo `.zip` exportado do Notion em Markdown:", type="zip")
 
-max_cards = st.slider("Máximo de flashcards por bloco:", 1, 5, 3)
+# Configurações do usuário
 limite_tokens = st.slider("Limite de tokens por bloco para envio ao OpenAI:", 200, 1500, 1000)
+limite_flashcards_totais = st.slider("Máximo total de flashcards a gerar:", 10, 300, 100)
+exportar_csv = st.checkbox("Exportar CSV", value=True)
+exportar_apkg = st.checkbox("Exportar APKG (Anki)", value=True)
 
-# Funções
-
-def extrair_texto_do_zip(zip_file):
+# Cache para extrair texto do zip
+@st.cache_data(show_spinner=False)
+def extrair_texto_do_zip(zip_file_bytes):
     textos = []
     with tempfile.TemporaryDirectory() as tmpdir:
-        with zipfile.ZipFile(zip_file, 'r') as zip_ref:
+        with zipfile.ZipFile(zip_file_bytes, 'r') as zip_ref:
             zip_ref.extractall(tmpdir)
         for root, _, files in os.walk(tmpdir):
             for file in files:
@@ -66,6 +69,8 @@ def extrair_texto_do_zip(zip_file):
                         textos.append(f.read())
     return textos
 
+# Cache para dividir texto em blocos com limite de tokens
+@st.cache_data(show_spinner=False)
 def dividir_em_blocos(textos, limite_tokens=1000):
     encoding = tiktoken.encoding_for_model("gpt-3.5-turbo")
     blocos = []
@@ -98,19 +103,28 @@ def filtrar_flashcards_duplicados(flashcards):
             filtrados.append((front, back))
     return filtrados
 
-def gerar_flashcards(blocos, max_cards, max_retries=2):
+def gerar_flashcards(blocos, limite_total_flashcards, max_retries=2):
     flashcards = []
-    system_message = PROMPT_SISTEMA.format(max_cards=max_cards)
+    total_blocos = len(blocos)
+    progresso = st.progress(0)
+    encoding = tiktoken.encoding_for_model("gpt-3.5-turbo")
 
     if 'logs' not in st.session_state:
         st.session_state.logs = []
 
-    total_blocos = len(blocos)
-    progresso = st.progress(0)
-
     for i, bloco in enumerate(blocos):
+        # Calcula max_cards para este bloco para não ultrapassar limite total
+        restante = limite_total_flashcards - len(flashcards)
+        if restante <= 0:
+            st.info(f"Limite total de {limite_total_flashcards} flashcards alcançado.")
+            break
+        # Define máximo para o bloco: mínimo entre slider máximo e restante
+        max_cards_bloco = min(5, restante)
+
+        system_message = PROMPT_SISTEMA_BASE.format(max_cards=max_cards_bloco)
+
         prompt = f"""
-A partir do conteúdo abaixo, gere até {max_cards} flashcards em YAML com campos:
+A partir do conteúdo abaixo, gere até {max_cards_bloco} flashcards em YAML com campos:
 - pergunta:
   resposta:
 
@@ -134,7 +148,7 @@ Conteúdo:
                 except yaml.YAMLError as ye:
                     st.warning(f"Erro de parse YAML no bloco {i+1}: {ye}")
                     st.text_area(f"Conteúdo retornado pela API no bloco {i+1}", conteudo, height=150)
-                    break  # Sai do retry para esse bloco
+                    break
 
                 if isinstance(resultado, list):
                     for item in resultado:
@@ -142,10 +156,13 @@ Conteúdo:
                         resposta = item.get("resposta")
                         if pergunta and resposta:
                             flashcards.append((pergunta.strip(), resposta.strip()))
+                            if len(flashcards) >= limite_total_flashcards:
+                                st.info(f"Limite total de {limite_total_flashcards} flashcards alcançado.")
+                                break
                 else:
                     st.warning(f"Formato inesperado no bloco {i+1}: {type(resultado)}")
                     st.text_area(f"Conteúdo retornado pela API no bloco {i+1}", conteudo, height=150)
-                break  # Sucesso, sai do retry
+                break
 
             except Exception as e:
                 st.session_state.logs.append(f"Erro no bloco {i+1}, tentativa {retry+1}: {e}")
@@ -153,9 +170,9 @@ Conteúdo:
                 if retry > max_retries:
                     st.warning(f"Falha ao gerar flashcards no bloco {i+1} após {max_retries} tentativas.")
                 else:
-                    time.sleep(1)  # pequeno delay antes de retry
+                    time.sleep(1)
 
-        progresso.progress((i+1)/total_blocos)
+        progresso.progress((i + 1) / total_blocos)
 
     return flashcards
 
@@ -186,10 +203,12 @@ def salvar_apkg(flashcards):
 # Processamento
 
 if uploaded_file and st.button("🚀 Gerar Flashcards"):
+    start_time = time.time()
     textos = extrair_texto_do_zip(uploaded_file)
     blocos = dividir_em_blocos(textos, limite_tokens)
     st.info(f"{len(blocos)} blocos serão processados.")
-    flashcards = gerar_flashcards(blocos, max_cards)
+
+    flashcards = gerar_flashcards(blocos, limite_flashcards_totais)
     flashcards = filtrar_flashcards_duplicados(flashcards)
 
     st.success(f"{len(flashcards)} flashcards gerados!")
@@ -202,17 +221,20 @@ if uploaded_file and st.button("🚀 Gerar Flashcards"):
             st.markdown(f"**Resposta:** {tras}")
             st.markdown("---")
 
-        csv_path = salvar_csv(flashcards)
-        apkg_path = salvar_apkg(flashcards)
+        if exportar_csv:
+            csv_path = salvar_csv(flashcards)
+            with open(csv_path, "rb") as f:
+                st.download_button("⬇️ Baixar CSV", f, file_name="flashcards.csv")
 
-        with open(csv_path, "rb") as f:
-            st.download_button("⬇️ Baixar CSV", f, file_name="flashcards.csv")
-        with open(apkg_path, "rb") as f:
-            st.download_button("⬇️ Baixar APKG (Anki)", f, file_name="flashcards.apkg")
+        if exportar_apkg:
+            apkg_path = salvar_apkg(flashcards)
+            with open(apkg_path, "rb") as f:
+                st.download_button("⬇️ Baixar APKG (Anki)", f, file_name="flashcards.apkg")
     else:
         st.warning("Nenhum flashcard válido foi gerado.")
 
+    end_time = time.time()
+    st.info(f"Tempo total de processamento: {end_time - start_time:.2f} segundos")
+
     if 'logs' in st.session_state and st.session_state.logs:
-        st.markdown("### Logs de processamento")
-        for log in st.session_state.logs:
-            st.write(log)
+        st.text_area("Logs de erros e avisos:", "\n".join(st.session_state.logs), height=150)

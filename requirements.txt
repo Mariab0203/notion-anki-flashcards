@@ -1,5 +1,6 @@
 streamlit
-openai
+requests
 pandas
 genanki
-requests
+openai
+pyyaml

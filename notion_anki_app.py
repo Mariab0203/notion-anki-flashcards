@@ -6,17 +6,22 @@ import uuid
 import openai
 import time
 
-# CONFIGURAÇÃO DA API
-openai.api_key = st.secrets["OPENAI_API_KEY"]
-
 st.set_page_config(page_title="Notion → Flashcards IA", layout="wide")
 st.title("🧠 Gerador Inteligente de Flashcards (Notion → Anki)")
 
+# Configurar chave da OpenAI: primeiro tenta o secrets.toml, depois input manual
+api_key = st.secrets.get("OPENAI_API_KEY") or st.text_input("🔑 Insira sua chave da OpenAI:", type="password")
+if not api_key:
+    st.warning("Por favor, insira sua chave da OpenAI para continuar.")
+    st.stop()
+
+openai.api_key = api_key
+
+# --- O resto do código continua igual ---
 # Input de URL e máximo de cards por bloco
 url = st.text_input("URL pública do arquivo de texto exportado do Notion (.txt)")
 max_cards = st.slider("Máximo de flashcards por bloco", min_value=1, max_value=5, value=3)
 
-# Função para baixar o texto
 def baixar_texto(url):
     try:
         resp = requests.get(url, timeout=10)
@@ -26,7 +31,6 @@ def baixar_texto(url):
         st.error(f"Erro ao baixar arquivo: {e}")
         return None
 
-# Função para dividir em blocos de até ~800 caracteres
 def dividir_em_blocos(texto, limite=800):
     parags = [p.strip() for p in texto.split("\n\n") if p.strip()]
     blocos = []
@@ -41,7 +45,6 @@ def dividir_em_blocos(texto, limite=800):
         blocos.append(cur)
     return blocos
 
-# Prompt com múltiplos flashcards
 def gerar_flashcards_ia(blocos, max_cards, modelo="gpt-3.5-turbo"):
     flashcards = []
     total = len(blocos)
@@ -66,28 +69,28 @@ Texto:
                 temperature=0.4,
             )
             conteudo = resp.choices[0].message.content
+            # Parse simples do YAML (assumindo padrão - pergunta: ... resposta: ...)
+            q, a = None, None
             for line in conteudo.strip().split("\n"):
-                if line.lower().strip().startswith("- pergunta:"):
+                line = line.strip()
+                if line.lower().startswith("- pergunta:"):
                     q = line.split(":",1)[1].strip()
-                    # next line resposta
-                    # we assume next line contains resposta
-                    # simple parsing
-                elif line.lower().strip().startswith("resposta:") or "resposta:" in line.lower():
+                elif line.lower().startswith("resposta:") or line.lower().startswith("  resposta:"):
                     a = line.split(":",1)[1].strip()
-                    flashcards.append((q, a))
+                    if q and a:
+                        flashcards.append((q, a))
+                        q, a = None, None
         except Exception as e:
             st.warning(f"Erro no bloco {idx+1}: {e}")
         bar.progress((idx + 1) / total)
         time.sleep(1.1)
     return flashcards
 
-# Export CSV
 def salvar_csv(flashcards):
     df = pd.DataFrame(flashcards, columns=["Front", "Back"])
     df.to_csv("flashcards_anki.csv", sep="\t", index=False)
     return "flashcards_anki.csv"
 
-# Export APKG
 def salvar_apkg(flashcards):
     model_id = uuid.uuid4().int >> 96
     deck_id = uuid.uuid4().int >> 96
@@ -103,7 +106,6 @@ def salvar_apkg(flashcards):
     pkg.write_to_file("flashcards_anki.apkg")
     return "flashcards_anki.apkg"
 
-# Fluxo
 if st.button("Processar Notion"):
     if not url:
         st.error("Cole a URL do arquivo .txt do Notion.")

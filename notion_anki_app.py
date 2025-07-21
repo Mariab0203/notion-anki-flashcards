@@ -1,4 +1,26 @@
 import streamlit as st
+from openai import OpenAI
+
+# ... seu código anterior ...
+
+# Inicializa o cliente OpenAI com a chave dos secrets
+client = OpenAI(api_key=st.secrets["sk-...Zd4A"]
+# --- TESTE TEMPORÁRIO DA API OPENAI ---
+st.markdown("### 🔍 Teste rápido da API OpenAI")
+try:
+    resposta = client.chat.completions.create(
+        model="gpt-3.5-turbo",
+        messages=[{"role": "user", "content": "Teste rápido da API OpenAI"}],
+        temperature=0,
+    )
+    st.success("✅ API OpenAI conectada com sucesso!")
+    st.write("Resposta da OpenAI:", resposta.choices[0].message.content)
+except Exception as e:
+    st.error(f"❌ Erro na chamada OpenAI: {e}")
+
+# ... resto do seu app ...
+
+import streamlit as st
 import zipfile
 import os
 import tempfile
